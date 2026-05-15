@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(podman ps *)",
+      "Bash(podman network *)",
+      "Bash(podman logs *)",
+      "Bash(podman inspect *)",
+      "Bash(python3 -m json.tool)",
+      "Read(//Users/agung.gunawan2/gitlab/**)",
+      "Read(//Users/agung.gunawan2/gitlab/data/**)",
+      "Bash(podman machine *)",
+      "Bash(grep -v '^$')",
+      "Read(//Users/agung.gunawan2/**)",
+      "Read(//Users/agung.gunawan2/gitlab-runner/**)"
+    ]
+  }
+}
