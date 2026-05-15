@@ -1,0 +1,36 @@
+concurrent = 2
+check_interval = 0
+shutdown_timeout = 0
+
+[session_server]
+  session_timeout = 1800
+
+[[runners]]
+  name = "pc-wsl2-flutter-runner"
+  url = "http://${MACBOOK_LAN_IP}:8080"
+  token = "${GITLAB_RUNNER_TOKEN}"
+  executor = "shell"
+  shell = "bash"
+
+  environment = [
+    "FLUTTER_HOME=/opt/flutter",
+    "ANDROID_HOME=/opt/android-sdk",
+    "PATH=/opt/flutter/bin:/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  ]
+
+  [runners.cache]
+    Type = "s3"
+    Shared = true
+    [runners.cache.s3]
+      # Use MacBook LAN IP — this runner is outside gitlab-net, so container DNS does not work
+      ServerAddress = "${MACBOOK_LAN_IP}:9000"
+      AccessKey = "${MINIO_ROOT_USER}"
+      SecretKey = "${MINIO_ROOT_PASSWORD}"
+      BucketName = "${GITLAB_CACHE_BUCKET}"
+      Insecure = true
+      Region = "us-east-1"
+
+  [runners.feature_flags]
+    FF_USE_FASTZIP = true
+
+  [runners.custom_build_dir]

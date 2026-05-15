@@ -1,0 +1,208 @@
+## Flutter CI Pipeline — MinIO Cache Benchmark
+##
+## Set CACHE_ENABLED=false at pipeline trigger time for a cold (no-cache) run.
+## Default is true (warm run, cache restored from MinIO on MacBook).
+##
+## Requires a runner tagged "wsl2-runner" (the Windows PC runner).
+
+variables:
+  FLUTTER_VERSION: "3.19.6"
+  FLUTTER_HOME: "/opt/flutter"
+  ANDROID_HOME: "/opt/android-sdk"
+  PUB_CACHE: "${CI_PROJECT_DIR}/.pub-cache"
+  CACHE_ENABLED: "true"
+
+stages:
+  - validate
+  - setup
+  - build
+  - test
+
+# ── Cache policies ────────────────────────────────────────────────────────────
+
+.cache_write: &cache_write
+  cache:
+    - key: "flutter-sdk-${FLUTTER_VERSION}"
+      paths:
+        - /opt/flutter/
+      policy: pull-push
+      when: always
+    - key:
+        files:
+          - pubspec.lock
+        prefix: "flutter-pub"
+      paths:
+        - .pub-cache/
+      policy: pull-push
+      when: always
+
+.cache_read: &cache_read
+  cache:
+    - key: "flutter-sdk-${FLUTTER_VERSION}"
+      paths:
+        - /opt/flutter/
+      policy: pull
+    - key:
+        files:
+          - pubspec.lock
+        prefix: "flutter-pub"
+      paths:
+        - .pub-cache/
+      policy: pull
+
+# ── validate ──────────────────────────────────────────────────────────────────
+
+validate:info:
+  stage: validate
+  tags: [wsl2-runner]
+  script:
+    - echo "PIPELINE_START=$(date +%s)" >> timing.env
+    - echo "Pipeline started at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    - echo "CACHE_ENABLED=${CACHE_ENABLED}"
+    - echo "Runner hostname=$(hostname)"
+    - echo "CPU cores=$(nproc)"
+    - echo "Available RAM=$(free -h | awk '/^Mem:/{print $7}') free"
+    - df -h / | tail -1
+  artifacts:
+    reports:
+      dotenv: timing.env
+    expire_in: 1 hour
+
+# ── setup: Flutter SDK ────────────────────────────────────────────────────────
+
+setup:flutter-sdk:
+  stage: setup
+  tags: [wsl2-runner]
+  <<: *cache_write
+  needs: [validate:info]
+  script:
+    - SDK_START=$(date +%s)
+    - |
+      if [ -x "${FLUTTER_HOME}/bin/flutter" ] && [ "${CACHE_ENABLED}" = "true" ]; then
+        echo "Flutter SDK found in cache at ${FLUTTER_HOME}"
+        echo "FLUTTER_SDK_CACHED=true" >> sdk_timing.env
+      else
+        echo "Flutter SDK not cached — downloading version ${FLUTTER_VERSION}..."
+        DL_START=$(date +%s)
+        sudo rm -rf "${FLUTTER_HOME}"
+        sudo mkdir -p /opt
+        wget -q --show-progress \
+          "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz" \
+          -O /tmp/flutter.tar.xz
+        sudo tar -xf /tmp/flutter.tar.xz -C /opt
+        rm /tmp/flutter.tar.xz
+        sudo chown -R gitlab-runner:gitlab-runner "${FLUTTER_HOME}"
+        DL_END=$(date +%s)
+        echo "FLUTTER_SDK_DOWNLOAD_SECONDS=$((DL_END - DL_START))" >> sdk_timing.env
+        echo "FLUTTER_SDK_CACHED=false" >> sdk_timing.env
+      fi
+    - export PATH="${FLUTTER_HOME}/bin:${PATH}"
+    - flutter --version
+    - echo "FLUTTER_SDK_SETUP_SECONDS=$(($(date +%s) - SDK_START))" >> sdk_timing.env
+  artifacts:
+    reports:
+      dotenv: sdk_timing.env
+    expire_in: 1 hour
+
+# ── setup: pub get ────────────────────────────────────────────────────────────
+
+setup:pub-get:
+  stage: setup
+  tags: [wsl2-runner]
+  <<: *cache_write
+  needs: [setup:flutter-sdk]
+  script:
+    - export PATH="${FLUTTER_HOME}/bin:${ANDROID_HOME}/cmdline-tools/latest/bin:${PATH}"
+    - PUB_START=$(date +%s)
+    - |
+      if [ -d "${PUB_CACHE}" ] && [ "${CACHE_ENABLED}" = "true" ]; then
+        echo "pub cache hit — $(du -sh "${PUB_CACHE}" | cut -f1) at ${PUB_CACHE}"
+        echo "PUB_CACHE_HIT=true" >> pub_timing.env
+      else
+        echo "pub cache miss — cold download"
+        echo "PUB_CACHE_HIT=false" >> pub_timing.env
+      fi
+    - flutter pub get
+    - echo "PUB_GET_SECONDS=$(($(date +%s) - PUB_START))" >> pub_timing.env
+    - |
+      PUB_SIZE=$(du -sh "${PUB_CACHE}" 2>/dev/null | cut -f1 || echo "0")
+      echo "PUB_CACHE_SIZE=${PUB_SIZE}" >> pub_timing.env
+      echo "pub cache size after get: ${PUB_SIZE}"
+  artifacts:
+    reports:
+      dotenv: pub_timing.env
+    expire_in: 1 hour
+
+# ── build: APK ────────────────────────────────────────────────────────────────
+
+build:apk:
+  stage: build
+  tags: [wsl2-runner]
+  <<: *cache_read
+  needs: [setup:pub-get]
+  script:
+    - export PATH="${FLUTTER_HOME}/bin:${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:${PATH}"
+    - BUILD_START=$(date +%s)
+    - flutter build apk --release --no-pub
+    - echo "BUILD_APK_SECONDS=$(($(date +%s) - BUILD_START))" >> build_timing.env
+    - |
+      APK="build/app/outputs/flutter-apk/app-release.apk"
+      if [ -f "${APK}" ]; then
+        APK_SIZE=$(du -sh "${APK}" | cut -f1)
+        echo "APK_SIZE=${APK_SIZE}" >> build_timing.env
+        echo "APK built: ${APK} (${APK_SIZE})"
+      fi
+  artifacts:
+    paths:
+      - build/app/outputs/flutter-apk/app-release.apk
+    reports:
+      dotenv: build_timing.env
+    expire_in: 1 week
+
+# ── test ─────────────────────────────────────────────────────────────────────
+
+test:unit:
+  stage: test
+  tags: [wsl2-runner]
+  <<: *cache_read
+  needs: [build:apk]
+  script:
+    - export PATH="${FLUTTER_HOME}/bin:${PATH}"
+    - TEST_START=$(date +%s)
+    - flutter test --no-pub
+    - echo "TEST_SECONDS=$(($(date +%s) - TEST_START))" >> test_timing.env
+    - echo "PIPELINE_END=$(date +%s)" >> test_timing.env
+  artifacts:
+    reports:
+      dotenv: test_timing.env
+    expire_in: 1 hour
+
+# ── benchmark summary ─────────────────────────────────────────────────────────
+
+benchmark:summary:
+  stage: test
+  tags: [wsl2-runner]
+  needs:
+    - { job: "validate:info",    artifacts: true }
+    - { job: "setup:flutter-sdk", artifacts: true }
+    - { job: "setup:pub-get",    artifacts: true }
+    - { job: "build:apk",        artifacts: true }
+    - { job: "test:unit",        artifacts: true }
+  script:
+    - |
+      TOTAL=$((${PIPELINE_END:-0} - ${PIPELINE_START:-0}))
+      echo "========================================"
+      echo "  PIPELINE BENCHMARK SUMMARY"
+      echo "========================================"
+      echo "  Cache enabled:          ${CACHE_ENABLED}"
+      echo "  Flutter SDK cached:     ${FLUTTER_SDK_CACHED:-unknown}"
+      echo "  SDK download time:      ${FLUTTER_SDK_DOWNLOAD_SECONDS:-0}s"
+      echo "  SDK setup total:        ${FLUTTER_SDK_SETUP_SECONDS:-unknown}s"
+      echo "  Pub cache hit:          ${PUB_CACHE_HIT:-unknown}"
+      echo "  pub get time:           ${PUB_GET_SECONDS:-unknown}s"
+      echo "  Pub cache size:         ${PUB_CACHE_SIZE:-unknown}"
+      echo "  APK build time:         ${BUILD_APK_SECONDS:-unknown}s"
+      echo "  APK size:               ${APK_SIZE:-unknown}"
+      echo "  Test time:              ${TEST_SECONDS:-unknown}s"
+      echo "  Total pipeline time:    ${TOTAL}s"
+      echo "========================================"

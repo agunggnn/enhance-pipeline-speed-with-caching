@@ -257,3 +257,91 @@ On macOS rootful Podman, use the Podman socket:
 -v $XDG_RUNTIME_DIR/podman/podman.sock:/var/run/docker.sock
 ```
 Or use the `shell` executor to avoid the socket requirement entirely.
+
+---
+
+## Phase 2 — Windows PC as GitLab Runner (Flutter builds)
+
+MacBook becomes too slow for Flutter APK builds. The Windows PC (i5-6500, 16 GB RAM) takes over builds via a GitLab Runner in WSL2, while GitLab CE and MinIO stay on the MacBook.
+
+### Architecture
+
+```
+MacBook Pro (Podman, already running):
+├── gitlab   → http://<macbook-lan-ip>:8080
+└── minio    → http://<macbook-lan-ip>:9000  (cache storage)
+
+Windows PC — WSL2 (Ubuntu 22.04):
+└── gitlab-runner (shell executor, tag: wsl2-runner)
+    ├── → GitLab  at http://<macbook-lan-ip>:8080
+    └── → MinIO   at http://<macbook-lan-ip>:9000
+```
+
+> The PC runner is **outside** `gitlab-net` so it uses the MacBook's LAN IP — not container names like `minio:9000`.
+
+### PC Setup (one-time)
+
+**1. Enable WSL2** (PowerShell as Administrator, then reboot):
+```powershell
+wsl --install -d Ubuntu-22.04
+```
+
+**2. Inside WSL2 Ubuntu**, clone this repo and prepare env:
+```bash
+git clone <repo-url>
+cd enhance-pipeline-speed-with-caching
+cp .env.example .env
+# Edit .env: set MACBOOK_LAN_IP to your MacBook's LAN IP (e.g. 192.168.1.x)
+# Find MacBook IP: ipconfig getifaddr en0
+nano .env
+```
+
+**3. Install dependencies + Flutter SDK:**
+```bash
+bash runner-pc/setup-wsl2.sh
+```
+This installs: GitLab Runner, Flutter 3.19.6, Android SDK (platform 34), Java 17.
+
+**4. Register the runner with MacBook's GitLab:**
+- Open `http://<macbook-lan-ip>:8080` → Admin → CI/CD → Runners → New instance runner
+- Select Linux, tag it `wsl2-runner`, click Create, copy the token
+- Add `GITLAB_RUNNER_TOKEN=<token>` to `.env`
+
+```bash
+bash runner-pc/register.sh
+```
+
+Verify in GitLab: Admin → CI/CD → Runners — `pc-wsl2-flutter-runner` should show **online**.
+
+**5. WSL2 autostart on Windows boot** (optional — Task Scheduler):
+- Trigger: At startup
+- Action: `wsl -u root service gitlab-runner start`
+
+### Flutter Pipeline
+
+Files are in `pipelines/flutter/`. Create a GitLab project, push those files, and the pipeline runs on the PC runner.
+
+Toggle `CACHE_ENABLED` at pipeline trigger time:
+- `true` (default) — warm run, deps restored from MinIO
+- `false` — cold run, full download from internet
+
+### Benchmark
+
+```bash
+# Set GITLAB_API_TOKEN and GITLAB_PROJECT_ID in .env first
+bash scripts/benchmark.sh
+```
+
+Triggers a cold pipeline then a warm pipeline and prints the speedup.
+
+**Expected results on i5-6500:**
+
+| Stage | Cold | Warm |
+|---|---|---|
+| Flutter SDK setup | ~3–4 min | ~30s |
+| pub get | ~2 min | ~10s |
+| APK build (Gradle) | ~10–15 min | ~10–15 min |
+| Tests | ~1 min | ~1 min |
+| **Total** | **~15–22 min** | **~12–17 min** |
+
+> Gradle compilation is not cached here. Add `~/.gradle/caches/` as a third cache key to save another 3–5 min on warm runs.
