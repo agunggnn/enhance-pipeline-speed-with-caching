@@ -1,16 +1,17 @@
-## Flutter CI Pipeline — MinIO Cache Benchmark
+## Flutter CI Pipeline — MinIO Cache Benchmark (Phase 3: macOS Podman runner)
 ##
 ## Set CACHE_ENABLED=false at pipeline trigger time for a cold (no-cache) run.
-## Default is true (warm run, cache restored from MinIO on MacBook).
-##
-## Requires a runner tagged "wsl2-runner" (the Windows PC runner).
+## Requires a runner tagged "macos-podman-runner" (MacBook, Podman docker executor).
+
+image: ubuntu:22.04
 
 variables:
   FLUTTER_VERSION: "3.19.6"
-  FLUTTER_HOME: "/opt/flutter"
-  ANDROID_HOME: "/opt/android-sdk"
+  FLUTTER_HOME: "${CI_PROJECT_DIR}/flutter-sdk"
   PUB_CACHE: "${CI_PROJECT_DIR}/.pub-cache"
   CACHE_ENABLED: "true"
+  # HTTP_PROXY / HTTPS_PROXY are injected by the runner's config.toml so all
+  # jobs reach Nexus via tinyproxy on macOS. NO_PROXY is also set there.
 
 stages:
   - validate
@@ -24,7 +25,7 @@ stages:
   cache:
     - key: "flutter-sdk-${FLUTTER_VERSION}"
       paths:
-        - /opt/flutter/
+        - flutter-sdk/
       policy: pull-push
       when: always
     - key:
@@ -40,7 +41,7 @@ stages:
   cache:
     - key: "flutter-sdk-${FLUTTER_VERSION}"
       paths:
-        - /opt/flutter/
+        - flutter-sdk/
       policy: pull
     - key:
         files:
@@ -54,7 +55,7 @@ stages:
 
 validate:info:
   stage: validate
-  tags: [wsl2-runner]
+  tags: [macos-podman-runner]
   script:
     - echo "PIPELINE_START=$(date +%s)" >> timing.env
     - echo "Pipeline started at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -63,18 +64,37 @@ validate:info:
     - echo "CPU cores=$(nproc)"
     - echo "Available RAM=$(free -h | awk '/^Mem:/{print $7}') free"
     - df -h / | tail -1
+    - |
+      if curl -sf --proxy "${HTTP_PROXY:-}" http://example.com >/dev/null 2>&1; then
+        echo "Nexus proxy reachable: OK"
+      else
+        echo "Nexus proxy: not reachable or not configured (non-fatal for non-Nexus builds)"
+      fi
   artifacts:
     reports:
       dotenv: timing.env
     expire_in: 1 hour
 
+# ── setup: system deps ────────────────────────────────────────────────────────
+# apt packages do not persist across jobs (fresh container each time), so this
+# job installs what every downstream job needs. Future optimisation: replace
+# ubuntu:22.04 with a pre-baked image to eliminate this job entirely.
+
+setup:apt-deps:
+  stage: setup
+  tags: [macos-podman-runner]
+  needs: [validate:info]
+  script:
+    - apt-get update -q
+    - apt-get install -y -q curl wget unzip xz-utils git openjdk-17-jdk lib32z1
+
 # ── setup: Flutter SDK ────────────────────────────────────────────────────────
 
 setup:flutter-sdk:
   stage: setup
-  tags: [wsl2-runner]
+  tags: [macos-podman-runner]
   <<: *cache_write
-  needs: [validate:info]
+  needs: [setup:apt-deps]
   script:
     - SDK_START=$(date +%s)
     - |
@@ -84,14 +104,13 @@ setup:flutter-sdk:
       else
         echo "Flutter SDK not cached — downloading version ${FLUTTER_VERSION}..."
         DL_START=$(date +%s)
-        sudo rm -rf "${FLUTTER_HOME}"
-        sudo mkdir -p /opt
+        rm -rf "${FLUTTER_HOME}"
         wget -q --show-progress \
           "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz" \
           -O /tmp/flutter.tar.xz
-        sudo tar -xf /tmp/flutter.tar.xz -C /opt
+        tar -xf /tmp/flutter.tar.xz -C "${CI_PROJECT_DIR}"
+        mv "${CI_PROJECT_DIR}/flutter" "${FLUTTER_HOME}"
         rm /tmp/flutter.tar.xz
-        sudo chown -R gitlab-runner:gitlab-runner "${FLUTTER_HOME}"
         DL_END=$(date +%s)
         echo "FLUTTER_SDK_DOWNLOAD_SECONDS=$((DL_END - DL_START))" >> sdk_timing.env
         echo "FLUTTER_SDK_CACHED=false" >> sdk_timing.env
@@ -108,11 +127,11 @@ setup:flutter-sdk:
 
 setup:pub-get:
   stage: setup
-  tags: [wsl2-runner]
+  tags: [macos-podman-runner]
   <<: *cache_write
   needs: [setup:flutter-sdk]
   script:
-    - export PATH="${FLUTTER_HOME}/bin:${ANDROID_HOME}/cmdline-tools/latest/bin:${PATH}"
+    - export PATH="${FLUTTER_HOME}/bin:${PATH}"
     - PUB_START=$(date +%s)
     - |
       if [ -d "${PUB_CACHE}" ] && [ "${CACHE_ENABLED}" = "true" ]; then
@@ -137,11 +156,11 @@ setup:pub-get:
 
 build:apk:
   stage: build
-  tags: [wsl2-runner]
+  tags: [macos-podman-runner]
   <<: *cache_read
   needs: [setup:pub-get]
   script:
-    - export PATH="${FLUTTER_HOME}/bin:${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:${PATH}"
+    - export PATH="${FLUTTER_HOME}/bin:${PATH}"
     - BUILD_START=$(date +%s)
     - flutter build apk --release --no-pub
     - echo "BUILD_APK_SECONDS=$(($(date +%s) - BUILD_START))" >> build_timing.env
@@ -163,7 +182,7 @@ build:apk:
 
 test:unit:
   stage: test
-  tags: [wsl2-runner]
+  tags: [macos-podman-runner]
   <<: *cache_read
   needs: [build:apk]
   script:
@@ -181,13 +200,13 @@ test:unit:
 
 benchmark:summary:
   stage: test
-  tags: [wsl2-runner]
+  tags: [macos-podman-runner]
   needs:
-    - { job: "validate:info",    artifacts: true }
-    - { job: "setup:flutter-sdk", artifacts: true }
-    - { job: "setup:pub-get",    artifacts: true }
-    - { job: "build:apk",        artifacts: true }
-    - { job: "test:unit",        artifacts: true }
+    - { job: "validate:info",      artifacts: true }
+    - { job: "setup:flutter-sdk",  artifacts: true }
+    - { job: "setup:pub-get",      artifacts: true }
+    - { job: "build:apk",          artifacts: true }
+    - { job: "test:unit",          artifacts: true }
   script:
     - |
       TOTAL=$((${PIPELINE_END:-0} - ${PIPELINE_START:-0}))

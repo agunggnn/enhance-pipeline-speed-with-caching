@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Triggers two sequential Flutter pipeline runs (cold then warm) and reports speedup.
-# Run from any machine that can reach the MacBook GitLab.
+# Run from any machine that can reach the PC's GitLab (http://192.168.1.20:8080).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -12,15 +12,15 @@ warn()  { echo -e "${YELLOW}[bench]${NC} $*"; }
 error() { echo -e "${RED}[bench]${NC} $*" >&2; exit 1; }
 
 if [ ! -f "${ROOT_DIR}/.env" ]; then
-  error ".env not found. Copy .env.example to .env and fill in MACBOOK_LAN_IP, GITLAB_API_TOKEN, GITLAB_PROJECT_ID."
+  error ".env not found. Copy .env.example to .env and fill in PC_LAN_IP, GITLAB_API_TOKEN, GITLAB_PROJECT_ID."
 fi
 set -a; source "${ROOT_DIR}/.env"; set +a
 
-: "${MACBOOK_LAN_IP:?}"
+: "${PC_LAN_IP:?}"
 : "${GITLAB_API_TOKEN:?GITLAB_API_TOKEN must be set — GitLab UI: User > Preferences > Access Tokens (scope: api)}"
 : "${GITLAB_PROJECT_ID:?GITLAB_PROJECT_ID must be set — find in project Settings > General}"
 
-API="http://${MACBOOK_LAN_IP}:8080/api/v4"
+API="http://${PC_LAN_IP}:8080/api/v4"
 H=(-H "PRIVATE-TOKEN: ${GITLAB_API_TOKEN}")
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -64,7 +64,7 @@ get_duration() {
 # ── Run benchmark ─────────────────────────────────────────────────────────────
 
 info ""
-info "GitLab: http://${MACBOOK_LAN_IP}:8080"
+info "GitLab: http://${PC_LAN_IP}:8080"
 info "Project ID: ${GITLAB_PROJECT_ID}"
 info ""
 
@@ -100,7 +100,7 @@ if [ -n "${COLD_SEC}" ] && [ -n "${WARM_SEC}" ] && [ "${WARM_SEC}" -gt 0 ]; then
   printf "  Reduction:         %s%%\n"          "${PCT}"
   echo ""
   echo "  Pipelines:"
-  echo "  Cold: http://${MACBOOK_LAN_IP}:8080/${GITLAB_PROJECT_ID}/pipelines/${COLD_ID}"
-  echo "  Warm: http://${MACBOOK_LAN_IP}:8080/${GITLAB_PROJECT_ID}/pipelines/${WARM_ID}"
+  echo "  Cold: http://${PC_LAN_IP}:8080/${GITLAB_PROJECT_ID}/pipelines/${COLD_ID}"
+  echo "  Warm: http://${PC_LAN_IP}:8080/${GITLAB_PROJECT_ID}/pipelines/${WARM_ID}"
   echo "========================================"
 fi
